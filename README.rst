@@ -1,3 +1,16 @@
+OpenStack Nova - Eguan distribution
+*************************************
+
+This is OpenStack's Nova compute service, patched for the eguan project.
+
+The patch adds support for the NBD network storage protocol to the libvirt hypervisor driver. It is designed to communicate with the eguan volume driver installed with the Cinder storage service.
+
+Upon detecting NBD client support on the hypervisor, the patch adds a 'nbd_client_id' field to the client connection initiation request that is answered by the eguan volume driver with NBD-specific connection parameters.
+
+Please refer to the eguan documentation for more details on how to setup the eguan service.
+
+Below is the original README content.
+
 OpenStack Nova README
 =====================
 

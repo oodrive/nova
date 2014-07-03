@@ -172,6 +172,7 @@ libvirt_opts = [
     cfg.ListOpt('volume_drivers',
                 default=[
                   'iscsi=nova.virt.libvirt.volume.LibvirtISCSIVolumeDriver',
+                  'nbd=nova.virt.libvirt.volume.LibvirtNBDVolumeDriver',
                   'iser=nova.virt.libvirt.volume.LibvirtISERVolumeDriver',
                   'local=nova.virt.libvirt.volume.LibvirtVolumeDriver',
                   'fake=nova.virt.libvirt.volume.LibvirtFakeVolumeDriver',
@@ -386,6 +387,7 @@ class LibvirtDriver(driver.ComputeDriver):
         self._initiator = None
         self._fc_wwnns = None
         self._fc_wwpns = None
+        self._nbd_support = None
         self._wrapped_conn = None
         self._wrapped_conn_lock = threading.Lock()
         self._caps = None
@@ -1285,6 +1287,9 @@ class LibvirtDriver(driver.ComputeDriver):
                           'world wide port names',
                           instance=instance)
 
+        if self._nbd_support is None:
+            self._nbd_support = libvirt_utils.is_nbd_supported()
+
         connector = {'ip': CONF.my_ip,
                      'host': CONF.host}
 
@@ -1294,6 +1299,9 @@ class LibvirtDriver(driver.ComputeDriver):
         if self._fc_wwnns and self._fc_wwpns:
             connector["wwnns"] = self._fc_wwnns
             connector["wwpns"] = self._fc_wwpns
+
+        if self._nbd_support:
+            connector.update(libvirt_utils.get_nbd_info())
 
         return connector
 
