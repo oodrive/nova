@@ -16,6 +16,7 @@
 
 """Volume drivers for libvirt."""
 
+import getopt
 import glob
 import os
 import time
@@ -228,6 +229,110 @@ class LibvirtNetVolumeDriver(LibvirtBaseVolumeDriver):
             conf.auth_secret_uuid = (conf.auth_secret_uuid or
                                      netdisk_properties['secret_uuid'])
         return conf
+
+
+class LibvirtNBDVolumeDriver(LibvirtBaseVolumeDriver):
+    """Driver to attach Network volumes to libvirt."""
+    def __init__(self, connection):
+        super(LibvirtNBDVolumeDriver,
+              self).__init__(connection, is_block_dev=False)
+
+    @utils.synchronized('nbd-allocation-lock')
+    def _get_first_free_device(self):
+        all_devs = set(glob.glob1('/sys/block/', 'nbd*'))
+        busy_devs = set([os.path.basename(os.path.dirname(x))
+                         for x in glob.glob('/sys/block/nbd*/pid')])
+        try:
+            return (all_devs - busy_devs).pop()
+        except KeyError:
+            return None
+
+    def _get_connected_devices(self, connection_info):
+        conn_data = connection_info['data']
+
+        busy_pids = glob.glob('/sys/block/nbd*/pid')
+
+        result = []
+        for pid_file in busy_pids:
+            f = open(pid_file, 'r')
+            pid = f.read().strip()
+            f.close()
+            try:
+                stdout = utils.execute('ps', '-p', pid, '-o', 'args=')[0]
+                [(name_opt, dev_name)], [cmd, serv_addr, serv_prt, nbd_dev] = (
+                getopt.gnu_getopt(stdout.split(), 'N:'))
+                if not name_opt or (dev_name != conn_data['nbd_dev_name']):
+                    continue
+                if not cmd or not nbd_dev:
+                    continue
+                target_portal = conn_data['target_portal'].split(':')
+                server_address = target_portal[0]
+                server_port = (target_portal[1] if len(target_portal) > 1
+                                                else '10809')
+                if serv_addr != server_address or serv_prt != server_port:
+                    continue
+            except processutils.ProcessExecutionError:
+                continue
+            except getopt.GetoptError:
+                continue
+            result.append(nbd_dev)
+        return result
+
+    @utils.synchronized('connect_volume')
+    def connect_volume(self, connection_info, disk_info):
+        """Attach the volume to instance_name."""
+        conf = super(LibvirtNBDVolumeDriver,
+                     self).connect_volume(connection_info,
+                                          disk_info)
+        conf.source_type = "block"
+
+        connected_devs = self._get_connected_devices(connection_info)
+        if connected_devs:
+            LOG.debug(_('NBD device already connected'))
+            conf.source_path = connected_devs[0]
+            return conf
+
+        conn_data = connection_info['data']
+        nbd_dev_name = conn_data['nbd_dev_name']
+        target_portal = conn_data['target_portal'].split(':')
+        server_address = target_portal[0]
+        server_port = target_portal[1] if len(target_portal) > 1 else '10809'
+
+        target_dev = self._get_first_free_device()
+        if not target_dev:
+            raise exception.NovaException(_('No available NBD device'))
+
+        host_device = '/dev/' + target_dev
+
+        utils.execute('nbd-client', server_address, server_port,
+                      host_device, '-N', nbd_dev_name,
+                      run_as_root=True)
+
+        # verify device is connected
+        try:
+            utils.execute('nbd-client', '-c', host_device,
+                      run_as_root=False, check_exit_code=True)
+        except processutils.ProcessExecutionError:
+            raise exception.NovaException(_('NBD device not connected'))
+
+        conf.source_type = "block"
+        conf.source_path = host_device
+        return conf
+
+    @utils.synchronized('connect_volume')
+    def disconnect_volume(self, connection_info, disk_dev):
+        """Detach the volume from instance_name."""
+        super(LibvirtNBDVolumeDriver,
+              self).disconnect_volume(connection_info, disk_dev)
+
+        for nbd_dev in self._get_connected_devices(connection_info):
+            try:
+                utils.execute('nbd-client', '-d', nbd_dev, run_as_root=True)
+                LOG.debug(_("Disconnected device %s") % (nbd_dev))
+            except processutils.ProcessExecutionError:
+                LOG.warn(_('Failed to disconnect device'))
+                raise exception.NovaException(_('Failed to disconnect'
+                                                " NBD device %s") % (nbd_dev))
 
 
 class LibvirtISCSIVolumeDriver(LibvirtBaseVolumeDriver):

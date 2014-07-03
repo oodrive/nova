@@ -19,8 +19,10 @@
 #    under the License.
 
 import errno
+import glob
 import os
 import platform
+import re
 
 from lxml import etree
 from oslo.config import cfg
@@ -47,6 +49,8 @@ CONF = cfg.CONF
 CONF.register_opts(libvirt_opts, 'libvirt')
 CONF.import_opt('instances_path', 'nova.compute.manager')
 LOG = logging.getLogger(__name__)
+
+NBD_RE = re.compile('^nbd')
 
 
 def execute(*args, **kwargs):
@@ -152,6 +156,45 @@ def get_fc_wwnns():
                 wwnns.append(wwnn)
 
     return wwnns
+
+
+def is_nbd_supported():
+    """Detects NBD client support."""
+    # check for the nbd-client
+    try:
+        execute('nbd-client', '-h', run_as_root=False)
+    except processutils.ProcessExecutionError:
+        LOG.warn(_('nbd-client not found'))
+        return False
+
+    # check for the nbd module
+    try:
+        return bool(filter(NBD_RE.match, open('/proc/modules').readlines()))
+    except IOError:
+        LOG.warn(_('could not read module file'))
+        return False
+
+
+@utils.synchronized('nbd-allocation-lock')
+def get_nbd_info():
+    """Get NBD client support information."""
+
+    result = {}
+
+    stderr = execute('nbd-client', '-h', run_as_root=False)[1]
+    if stderr:
+        result['nbd_client_id'] = stderr.split('\n')[0]
+
+    # check the number of free devices
+    nb_devs = len(glob.glob1('/sys/block/', 'nbd*'))
+    unused_devs = nb_devs - len(glob.glob('/sys/block/nbd*/pid'))
+
+    if (nb_devs == 0) or (unused_devs == 0):
+        LOG.warn(_("no available nbd resources: %(dev)d devices,"
+                   "%(used)d unused"), {'dev': nb_devs, 'used': unused_devs})
+        return None
+
+    return result
 
 
 def create_image(disk_format, path, size):
